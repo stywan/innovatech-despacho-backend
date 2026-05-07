@@ -1,0 +1,92 @@
+version: '3.9'
+
+# =============================================================================
+# EP2 - Innovatech Chile | Stack Backend
+#
+# Servicios:
+#   - db       : MySQL 8 (solo accesible por red interna, sin puerto expuesto)
+#   - backend  : Spring Boot API (puerto 8081)
+#
+# Persistencia:
+#   - Named Volume "mysql_data" → los datos de MySQL sobreviven reinicios
+#   - Elección named volume vs bind mount: Docker gestiona la ubicación
+#     internamente, es portable entre entornos y no expone rutas del host.
+#
+# Uso:
+#   Levantar:   docker compose up -d
+#   Detener:    docker compose down          (conserva volúmenes)
+#   Destruir:   docker compose down -v      (elimina volúmenes también)
+#   Rebuild:    docker compose up -d --build
+# =============================================================================
+
+services:
+
+  # ── Base de datos MySQL 8 ─────────────────────────────────────────────────
+  db:
+    image: mysql:8.0
+    container_name: citt-db
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-citt_despachos}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?Variable DB_PASSWORD requerida}
+      MYSQL_USER: ${DB_USERNAME:-innovauser}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      # Named volume: datos persisten aunque el contenedor se detenga o elimine
+      - mysql_data:/var/lib/mysql
+    networks:
+      - backend-net
+    # Sin ports: solo accesible desde la red interna del stack
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── API Spring Boot ────────────────────────────────────────────────────────
+  backend:
+    image: ${DOCKER_IMAGE:-backend:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: citt-despacho-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-8081}:8081"
+    environment:
+      # application.properties usa ${DB_ENDPOINT}, ${DB_PORT}, ${DB_NAME}, etc.
+      # Spring Boot resuelve estas variables desde el entorno del contenedor
+      DB_ENDPOINT: db
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-citt_despachos}
+      DB_USERNAME: ${DB_USERNAME:-innovauser}
+      DB_PASSWORD: ${DB_PASSWORD:?Variable DB_PASSWORD requerida}
+    networks:
+      - backend-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/api/v1/despachos"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+# =============================================================================
+# Volúmenes con nombre (named volumes)
+# Justificación: a diferencia de bind mounts, los named volumes son gestionados
+# por Docker, son portables entre entornos y no exponen rutas del host.
+# Los datos de MySQL se preservan entre reinicios y actualizaciones del servicio.
+# =============================================================================
+volumes:
+  mysql_data:
+    name: citt_mysql_data
+    driver: local
+
+# Red interna — el contenedor MySQL no está expuesto al host ni a internet
+networks:
+  backend-net:
+    driver: bridge

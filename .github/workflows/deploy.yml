@@ -1,0 +1,114 @@
+name: CI/CD – Backend Despacho (Spring Boot)
+
+# =============================================================================
+# Trigger: únicamente en push a la rama "deploy"
+# Flujo: Build imagen Docker → Push a Docker Hub → Deploy en EC2 privada
+#
+# Arquitectura:
+#   - EC2 Backend (privada): aloja AMBOS servicios (despacho:8081 + ventas:8082)
+#   - EC2 Data (privada): MySQL compartido, accesible vía DB_ENDPOINT
+#   - EC2 Frontend (pública): actúa como bastion para el acceso SSH al backend
+# =============================================================================
+
+on:
+  push:
+    branches:
+      - deploy
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/citt-despacho-backend
+
+jobs:
+  # ── Job 1: Construir y publicar imagen ──────────────────────────────────────
+  build-and-push:
+    name: Build & Push → Docker Hub
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del código fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generar metadata (tags y labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Build y Push de la imagen Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Job 2: Desplegar en EC2 Backend (subred privada vía bastion) ─────────────
+  deploy:
+    name: Deploy → EC2 Backend (via bastion)
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Conectar a EC2 backend vía bastion (EC2 frontend) y desplegar
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          # EC2 backend (IP privada, sin acceso desde internet)
+          host: ${{ secrets.EC2_BACKEND_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+
+          # Jump host: EC2 frontend (IP pública) actúa como bastion
+          proxy_host: ${{ secrets.EC2_FRONTEND_HOST }}
+          proxy_username: ${{ secrets.EC2_USER }}
+          proxy_key: ${{ secrets.EC2_SSH_KEY }}
+
+          script: |
+            set -e
+
+            echo "=== Autenticando en Docker Hub ==="
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" \
+              | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+            echo "=== Descargando imagen más reciente ==="
+            docker pull ${{ env.IMAGE_NAME }}:latest
+
+            echo "=== Deteniendo contenedor anterior (si existe) ==="
+            docker stop citt-despacho-backend 2>/dev/null || true
+            docker rm   citt-despacho-backend 2>/dev/null || true
+
+            echo "=== Iniciando nuevo contenedor backend despacho ==="
+            docker run -d \
+              --name citt-despacho-backend \
+              --restart unless-stopped \
+              -p 8081:8081 \
+              -e DB_ENDPOINT="${{ secrets.DB_ENDPOINT }}" \
+              -e DB_PORT="3306" \
+              -e DB_NAME="${{ secrets.DB_NAME_DESPACHOS }}" \
+              -e DB_USERNAME="${{ secrets.DB_USERNAME }}" \
+              -e DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+              ${{ env.IMAGE_NAME }}:latest
+
+            echo "=== Verificando que el contenedor está corriendo ==="
+            sleep 10
+            docker ps --filter "name=citt-despacho-backend" --format "{{.Status}}"
+
+            echo "=== Limpiando imágenes antiguas ==="
+            docker image prune -f
+
+            echo "=== Despliegue completado ==="

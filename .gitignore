@@ -1,0 +1,25 @@
+# Maven build output
+target/
+
+# Entorno local — NUNCA subir al repo
+.env
+.env.local
+
+# IDE
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Spring Boot
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
