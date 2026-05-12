@@ -6,7 +6,6 @@
 
 # Ignora dependencias locales
 target/
-.mvn/
 .settings/
 
 # Ignora control de versiones y sistema de build
